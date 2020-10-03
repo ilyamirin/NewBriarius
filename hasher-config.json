@@ -1,0 +1,12 @@
+{
+    "CONNECTION": "mongodb://localhost:27017/",
+    "DATABASE": "cracen",
+    "COLLECTION": "email_leaks_collection",
+    "HASHABLE_FIELD": "email",
+    "DISPLAY_FIELD": "password",
+    "HASH_DIR": "email-hashs",
+    "HASH_FUNC": "md5",
+    "PREFIX_SIZE": 8,
+    "FILE_EXTENSION": "json",
+    "JSON_INDENT": 4
+}
