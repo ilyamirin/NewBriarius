@@ -1,153 +1,231 @@
+#!/usr/bin/env python
+
+import argparse
 import sys
-from pymongo import MongoClient
+import asyncio
 import json
+from motor.motor_asyncio import AsyncIOMotorClient
 import hashlib
 from pathlib import Path
-from bson import json_util
-from tqdm import tqdm
+from tqdm.asyncio import tqdm
+import shutil
 
+#TODO: Повесить глобальный обработчик ошибок
 
 def eprint(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
 
+class NotificationError(Exception):
+    pass
 
-def hashs_exists():
-    path = Path(HASH_DIR)
+class LazyDict(dict):
+    def get(self, key, thunk=None):
+        return (self[key] if key in self else
+                thunk() if callable(thunk) else
+                thunk)
 
-    if not path.exists():
-        return False
+    def setdefault(self, key, thunk=None):
+        return (self[key] if key in self else
+                dict.setdefault(self, key,
+                                thunk() if callable(thunk) else
+                                thunk))
 
-    if not any(path.iterdir()):
-        return False
+class FileHelper:
+    def __init__(self, buffer_size):
+        self.handlers = LazyDict()
+        self.buffer_size = buffer_size
 
-    return True
+    class FileGetter: 
+        def __init__(self, handlers, buffer_size): 
+            self.handlers = handlers
+            self.buffer_size = buffer_size
 
+        def get_file(self, file_name): 
+            create_file = lambda: open(file_name, 'a', self.buffer_size, newline='', encoding="utf-8")
+            return self.handlers.setdefault(file_name, create_file)
 
-def save_json(hashed_field, data_dic):
-    file_name = f'{hashed_field[:PREFIX_SIZE]}.{FILE_EXTENSION}'
-    path = Path(HASH_DIR)
+    def __enter__(self):
+        return self.FileGetter(self.handlers, self.buffer_size)
 
-    if not path.exists():
-        path.mkdir(parents=True, exist_ok=True)
+    def __exit__(self, type, value, traceback):
+        for fd in self.handlers.values():
+            fd.close()
 
-    path = path / file_name
-    print(path)
+class Commands:
+    def __init__(self, config_dic):
+        for key, value in config_dic.items():
+            setattr(self, key, value)
 
-    data_dic = [data_dic]
-    if path.exists():
-        with path.open("r") as f:
-            data = f.read()
-            file_data = json_util.loads(data)
-            data_dic = data_dic + file_data
+        self.hash_func = self.__hashing_field(self.HASH_FUNC)
+        self.hash_dir = Path(self.HASH_DIR)
 
-    with path.open("w") as f:
-        json.dump(data_dic, f, default=json_util.default, indent=JSON_INDENT)
+    def __hashing_field(self, algorithm):
+        h = hashlib.new(algorithm)
 
+        def hashing_string(string):
+            htmp = h.copy()
+            htmp.update(string.encode())
+            return htmp.hexdigest()
 
-def load_json(hashed_field, field):
-    file_name = f'{hashed_field[:PREFIX_SIZE]}.{FILE_EXTENSION}'
-    path = Path(HASH_DIR, file_name)
+        return hashing_string
 
-    if not path.exists():
-        return []
+    def __save_csv(self, file_getter, hashed_field, data_dic):
+        file_name = f'{hashed_field[:self.PREFIX_SIZE]}.csv'
+        path = self.hash_dir / file_name
 
-    with path.open("r") as f:
-        data = f.read()
-        file_data = json_util.loads(data)
+        out = file_getter.get_file(path)
 
-    res = []
+        # TODO: Добавить экранирование
+        text = f'{data_dic[self.HASHABLE_FIELD]}{self.CSV_DELIMITER}{data_dic[self.DISPLAY_FIELD]}\n'
+        out.write(text)
 
-    for item in file_data:
-        if HASHABLE_FIELD not in item: continue
-        if item[HASHABLE_FIELD] != field: continue
-        res.append(item)
+    def __load_csv(self, hashed_field, field):
+        file_name = f'{hashed_field[:self.PREFIX_SIZE]}.csv'
+        path = self.hash_dir / file_name
 
-    return res
+        if not path.exists():
+            return None
 
+        with path.open('r', self.FILE_BUFFE_SIZE, newline='', encoding="utf-8") as f:
+            for line in f:
+                line_arr = line.rstrip('\n').split(self.CSV_DELIMITER)
+                #TODO: Тут должна быть запись в лог
+                if len(line_arr) != 2: continue
+                if line_arr[0] == field:
+                    yield line_arr[1]
 
-class TqdmUpTo(tqdm):
-    def update_to(self, collection, filter):
-        self.total = collection.count_documents(filter)
-        return True
+    async def __fill_dir(self, client, file_getter):
+        db = client[self.DATABASE]
+        collection = db[self.COLLECTION]
+        cursor = collection.find()
 
+        with tqdm(desc='Loading', unit=' records') as progress:
+            docs = await cursor.to_list(length=self.CHUNK_SIZE)
+            while docs:
+                for doc in docs:
+                    if self.HASHABLE_FIELD not in doc: continue
+                    if self.DISPLAY_FIELD not in doc: continue
+                    field = doc[self.HASHABLE_FIELD]
+                    hashed_field = self.hash_func(field)
+                    self.__save_csv(file_getter, hashed_field, doc)
+                    #TODO: Возможно, нужно увеличивать в начале цикла
+                    progress.update()
+                docs = await cursor.to_list(length=self.CHUNK_SIZE)
 
-def hash_elements_to_dir(hashable_func):
-    with MongoClient(CONNECTION) as client:
-        db = client[DATABASE]
-        collection = db[COLLECTION]
-        filter = {HASHABLE_FIELD:{'$ne':None}}
-        items = collection.find(filter)
+    def download_elements(self):
+        if not self.hash_dir.exists():
+            self.hash_dir.mkdir(parents=True, exist_ok=True)
 
-        with TqdmUpTo(collection) as progress:
-            progress.update_to(collection, filter)
-            for item in items:
-                field = item[HASHABLE_FIELD]
-                hashed_field = hashable_func(field)
-                save_json(hashed_field, item)
-                progress.update()
+        with FileHelper(self.FILE_BUFFE_SIZE) as file_getter:
+            client = AsyncIOMotorClient(self.CONNECTION)
+            loop = asyncio.get_event_loop()
+            try:
+                loop.run_until_complete(self.__fill_dir(client, file_getter))
+            finally:
+                loop.close()
+                client.close()
 
+        print('Download completed successfully')
 
-def hashing_field(algorithm):
-    h = hashlib.new(algorithm)
+    def search_elements(self, get_first=False):
+        if not self.hash_dir.exists():
+            raise NotificationError('The folder does not exist. There is nothing to look for')
 
-    def hashing_string(string):
-        htmp = h.copy()
-        htmp.update(string.encode())
-        res = htmp.hexdigest()
-        return res
+        print(f'Enter {self.HASHABLE_FIELD} for search {self.DISPLAY_FIELD}. Press Cntrl-C to exit')
 
-    return hashing_string
+        for line in sys.stdin:
+            search_line = line.rstrip('\n')
+            hashed_field = self.hash_func(search_line)
+            element_founder = self.__load_csv(hashed_field, search_line)
 
+            found_el = set()
+            for element in element_founder:
+                found_el.add(element)
+                if get_first: break
 
-def found_elements(field, hashable_func):
-    hashed_field = hashable_func(field)
-    elements = load_json(hashed_field, field)
+            res = list(found_el)
 
-    res = set()
+            data = {
+                self.HASHABLE_FIELD: search_line,
+            }
 
-    for element in elements:
-        if DISPLAY_FIELD not in element: continue
-        res.add(element[DISPLAY_FIELD])
+            if len(res) > 0:
+                if get_first:
+                    res = next(iter(res), None)
+                data[self.DISPLAY_FIELD] = res
 
-    res = list(res)
+            print(json.dumps(data, indent=4, ensure_ascii=False))
 
-    return res
+    def optimize_archives(self):
+        if not self.hash_dir.exists():
+            raise NotificationError('The folder does not exist. There is nothing to optimize')
 
+        files = list(self.hash_dir.glob('*.csv'))
+
+        for file in tqdm(files, desc='Optimization', unit=' files'):
+            completed_lines_hash = set()
+            #TODO: Удалять временный файл при ошибке
+            tmp_file = self.hash_dir / f'{file.name}.tmp'
+            with open(tmp_file, 'w', self.FILE_BUFFE_SIZE, newline='', encoding="utf-8") as output_file,\
+                open(file, 'r', self.FILE_BUFFE_SIZE, newline='', encoding="utf-8") as input_file: 
+                for line in input_file:
+                    hashed_line = self.hash_func(line)
+                    if hashed_line not in completed_lines_hash:
+                        output_file.write(line)
+                        completed_lines_hash.add(hashed_line)
+
+            shutil.move(tmp_file, file)
+
+        print('Optimization completed successfully')
 
 def merge_config(db_config, json_config_file):
     path = Path(json_config_file)
 
     if path.exists():
-        with path.open("r") as f:
-            data = f.read()
-            json_config = json.loads(data)
+        with path.open('r') as f:
+            json_config = json.loads(f.read())
             db_config = {**db_config, **json_config}
     else:
-        with path.open("w") as f:
-            json.dump(db_config, f, indent=db_config['JSON_INDENT'])
+        with path.open('w') as f:
+            json.dump(db_config, f, indent=4)
+
+    #TODO: Добавить валидацию других полей
+    if db_config['PREFIX_SIZE'] not in (1, 2):
+        raise NotificationError('Parameter "PREFIX_SIZE" must be one or two')
+
+    if db_config['HASHABLE_FIELD'] == db_config['DISPLAY_FIELD']:
+        raise NotificationError('Parameters "HASHABLE_FIELD" and "DISPLAY_FIELD" must be different')
 
     return db_config
 
-
 def main(db_config):
-    for key, value in db_config.items():
-        globals()[key] = value
+    parser = argparse.ArgumentParser(description=
+        'A utility for downloading a large number of records from the MongoDB collection\
+        to the hard disk into *.csv files. Allows you to search by them.\
+        Csv files save two fields: by which to search and the desired one.'
+    )
+    #TODO: Заюзать os.getenv
+    parser.add_argument('-c', '--config', help='path to configuration file', default='hasher-config.json')
+    parser.add_argument('cmd', 
+        help='command to execute', 
+        choices=['download', 'optimize', 'search-all', 'search-one']
+    )
+    if len(sys.argv) == 1:
+        parser.print_help(sys.stderr)
+        sys.exit(1)
+    args = parser.parse_args()
 
-    hash_func = hashing_field(HASH_FUNC)
+    db_config = merge_config(db_config, args.config)
 
-    if not hashs_exists():
-        hash_elements_to_dir(hash_func)
-
-    print(f'Enter {HASHABLE_FIELD} for search {DISPLAY_FIELD}. Press Cntrl+C to exit')
-
-    for line in sys.stdin:
-        my_line = line.rstrip('\n')
-        element_founder = found_elements(my_line, hash_func)
-        print(element_founder)
-
+    cmd = Commands(db_config)
+    commands = {
+        'download': lambda cmd: cmd.download_elements(),
+        'optimize': lambda cmd: cmd.optimize_archives(),
+        'search-all': lambda cmd: cmd.search_elements(),
+        'search-one': lambda cmd: cmd.search_elements(get_first=True),
+    }[args.cmd](cmd)
 
 if __name__ == '__main__':
-    config_file = './hasher-config.json'
     db_config = {
         'CONNECTION': 'mongodb://localhost:27017/',
         'DATABASE': 'test_db',
@@ -156,23 +234,18 @@ if __name__ == '__main__':
         'DISPLAY_FIELD': 'password',
         'HASH_DIR': './email-hashs/',
         'HASH_FUNC': 'md5',
-        'PREFIX_SIZE': 8,
-        'FILE_EXTENSION': 'json',
-        'JSON_INDENT': 4,
+        'PREFIX_SIZE': 2,
+        'CHUNK_SIZE': 10000,
+        'FILE_BUFFE_SIZE': 1048576,
+        'CSV_DELIMITER': ';',
     }
 
     try:
-        arguments = len(sys.argv)
-
-        if arguments == 2:
-            config_file = sys.argv[1]
-        elif arguments > 2:
-            raise ValueError('There should be only one argument: path to the configuration file')
-
-        db_config = merge_config(db_config, config_file)
         main(db_config)
     except KeyboardInterrupt:
+        print('Canceled by user')
         pass
-    except Exception as msg:
-        eprint(msg)
+    except NotificationError as msg:
+        # TODO: Добавить логирование
+        eprint(f'ERROR: {msg}')
         sys.exit(1)

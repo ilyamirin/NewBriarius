@@ -1,0 +1,2 @@
+# NewBriarius
+A utility for downloading a large number of records from the MongoDB collection to the hard disk into *.csv files. Allows you to search by them. Csv files save two fields: by which to search and the desired one.
