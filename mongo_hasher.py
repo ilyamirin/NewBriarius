@@ -78,7 +78,7 @@ class Commands:
 
         out = file_getter.get_file(path)
 
-        # TODO: Добавить экранирование
+        #TODO: Добавить экранирование
         text = f'{data_dic[self.HASHABLE_FIELD]}{self.CSV_DELIMITER}{data_dic[self.DISPLAY_FIELD]}\n'
         out.write(text)
 
@@ -110,12 +110,13 @@ class Commands:
                 docs = await cursor.to_list(length=self.CHUNK_SIZE)
                 while docs:
                     for doc in docs:
-                        iterated += 1
-                        if self.HASHABLE_FIELD not in doc: continue
-                        if self.DISPLAY_FIELD not in doc: continue
+                        if self.HASHABLE_FIELD not in doc or self.DISPLAY_FIELD not in doc:
+                            iterated += 1
+                            continue
                         field = doc[self.HASHABLE_FIELD]
                         hashed_field = self.hash_func(field)
                         self.__save_csv(file_getter, hashed_field, doc)
+                        iterated += 1
                         downloaded += 1
                         #TODO: Возможно, нужно увеличивать в начале цикла
                         progress.update()
