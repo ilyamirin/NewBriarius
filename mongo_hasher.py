@@ -41,8 +41,11 @@ class FileHelper:
             self.buffer_size = buffer_size
 
         def get_file(self, file_name): 
-            create_file = lambda: open(file_name, 'a', self.buffer_size, newline='', encoding="utf-8")
+            create_file = lambda: open(file_name, 'a', self.buffer_size, newline='', encoding='utf-8')
             return self.handlers.setdefault(file_name, create_file)
+
+        def __len__(self):
+            return len(self.handlers)
 
     def __enter__(self):
         return self.FileGetter(self.handlers, self.buffer_size)
@@ -86,7 +89,7 @@ class Commands:
         if not path.exists():
             return None
 
-        with path.open('r', self.FILE_BUFFE_SIZE, newline='', encoding="utf-8") as f:
+        with path.open('r', self.FILE_BUFFE_SIZE, newline='', encoding='utf-8') as f:
             for line in f:
                 line_arr = line.rstrip('\n').split(self.CSV_DELIMITER)
                 #TODO: Тут должна быть запись в лог
@@ -99,18 +102,31 @@ class Commands:
         collection = db[self.COLLECTION]
         cursor = collection.find()
 
-        with tqdm(desc='Loading', unit=' records') as progress:
-            docs = await cursor.to_list(length=self.CHUNK_SIZE)
-            while docs:
-                for doc in docs:
-                    if self.HASHABLE_FIELD not in doc: continue
-                    if self.DISPLAY_FIELD not in doc: continue
-                    field = doc[self.HASHABLE_FIELD]
-                    hashed_field = self.hash_func(field)
-                    self.__save_csv(file_getter, hashed_field, doc)
-                    #TODO: Возможно, нужно увеличивать в начале цикла
-                    progress.update()
+        iterated = 0
+        downloaded = 0
+
+        try:
+            with tqdm(desc='Loading', unit=' records') as progress:
                 docs = await cursor.to_list(length=self.CHUNK_SIZE)
+                while docs:
+                    for doc in docs:
+                        iterated += 1
+                        if self.HASHABLE_FIELD not in doc: continue
+                        if self.DISPLAY_FIELD not in doc: continue
+                        field = doc[self.HASHABLE_FIELD]
+                        hashed_field = self.hash_func(field)
+                        self.__save_csv(file_getter, hashed_field, doc)
+                        downloaded += 1
+                        #TODO: Возможно, нужно увеличивать в начале цикла
+                        progress.update()
+                    docs = await cursor.to_list(length=self.CHUNK_SIZE)
+        finally:
+            data = {
+                'iterated': iterated,
+                'downloaded': downloaded,
+                'files_affected': len(file_getter),
+            }
+            print(json.dumps(data, indent=4))
 
     def download_elements(self):
         if not self.hash_dir.exists():
@@ -162,19 +178,46 @@ class Commands:
 
         files = list(self.hash_dir.glob('*.csv'))
 
-        for file in tqdm(files, desc='Optimization', unit=' files'):
-            completed_lines_hash = set()
-            #TODO: Удалять временный файл при ошибке
-            tmp_file = self.hash_dir / f'{file.name}.tmp'
-            with open(tmp_file, 'w', self.FILE_BUFFE_SIZE, newline='', encoding="utf-8") as output_file,\
-                open(file, 'r', self.FILE_BUFFE_SIZE, newline='', encoding="utf-8") as input_file: 
-                for line in input_file:
-                    hashed_line = self.hash_func(line)
-                    if hashed_line not in completed_lines_hash:
-                        output_file.write(line)
-                        completed_lines_hash.add(hashed_line)
+        iterated = 0
+        removed = 0
+        files_viewed = 0
+        files_changed = 0
 
-            shutil.move(tmp_file, file)
+        try:
+            for file in tqdm(files, desc='Optimization', unit=' files'):
+                completed_lines_hash = set()
+                tmp_file = self.hash_dir / f'{file.name}.tmp'
+
+                current_rem = 0
+
+                try:
+                    with open(tmp_file, 'w', self.FILE_BUFFE_SIZE, newline='', encoding='utf-8') as output_file,\
+                        open(file, 'r', self.FILE_BUFFE_SIZE, newline='', encoding='utf-8') as input_file: 
+                        for line in input_file:
+                            iterated += 1
+                            hashed_line = self.hash_func(line)
+                            if hashed_line not in completed_lines_hash:
+                                output_file.write(line)
+                                completed_lines_hash.add(hashed_line)
+                            else:
+                                current_rem += 1
+                except:
+                    if tmp_file.exists():
+                        tmp_file.unlink()
+                    raise
+
+                files_viewed += 1
+                shutil.move(tmp_file, file)
+                removed += current_rem
+                files_changed += bool(current_rem)
+        finally:
+            data = {
+                'iterated': iterated,
+                'removed': removed,
+                'files_viewed': files_viewed,
+                'files_changed': files_changed,
+            }
+            print(json.dumps(data, indent=4))
 
         print('Optimization completed successfully')
 
@@ -190,11 +233,17 @@ def merge_config(db_config, json_config_file):
             json.dump(db_config, f, indent=4)
 
     #TODO: Добавить валидацию других полей
+    if db_config['HASHABLE_FIELD'] == db_config['DISPLAY_FIELD']:
+        raise NotificationError('Parameters "HASHABLE_FIELD" and "DISPLAY_FIELD" must be different')
+
     if db_config['PREFIX_SIZE'] not in (1, 2):
         raise NotificationError('Parameter "PREFIX_SIZE" must be one or two')
 
-    if db_config['HASHABLE_FIELD'] == db_config['DISPLAY_FIELD']:
-        raise NotificationError('Parameters "HASHABLE_FIELD" and "DISPLAY_FIELD" must be different')
+    if not isinstance(db_config['CHUNK_SIZE'], int):
+        raise NotificationError('Parameter "CHUNK_SIZE" must be integer value')
+
+    if not isinstance(db_config['FILE_BUFFE_SIZE'], int):
+        raise NotificationError('Parameter "FILE_BUFFE_SIZE" must be integer value')
 
     return db_config
 
@@ -232,11 +281,11 @@ if __name__ == '__main__':
         'COLLECTION': 'users_coll',
         'HASHABLE_FIELD': 'email',
         'DISPLAY_FIELD': 'password',
-        'HASH_DIR': './email-hashs/',
+        'HASH_DIR': 'email-hashs',
         'HASH_FUNC': 'md5',
         'PREFIX_SIZE': 2,
-        'CHUNK_SIZE': 10000,
-        'FILE_BUFFE_SIZE': 1048576,
+        'CHUNK_SIZE': 1000,
+        'FILE_BUFFE_SIZE': 1048576, # 1 MB
         'CSV_DELIMITER': ';',
     }
 
