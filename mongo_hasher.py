@@ -1,22 +1,25 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import argparse
 import sys
 import asyncio
 import json
-from motor.motor_asyncio import AsyncIOMotorClient
 import hashlib
+import shutil
+
 from pathlib import Path
 from tqdm.asyncio import tqdm
-import shutil
+from motor.motor_asyncio import AsyncIOMotorClient
 
 #TODO: Повесить глобальный обработчик ошибок
 
 def eprint(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
 
+
 class NotificationError(Exception):
     pass
+
 
 class LazyDict(dict):
     def get(self, key, thunk=None):
@@ -29,6 +32,7 @@ class LazyDict(dict):
                 dict.setdefault(self, key,
                                 thunk() if callable(thunk) else
                                 thunk))
+
 
 class FileHelper:
     def __init__(self, buffer_size):
@@ -53,6 +57,7 @@ class FileHelper:
     def __exit__(self, type, value, traceback):
         for fd in self.handlers.values():
             fd.close()
+
 
 class Commands:
     def __init__(self, config_dic):
@@ -222,6 +227,7 @@ class Commands:
 
         print('Optimization completed successfully')
 
+
 def merge_config(db_config, json_config_file):
     path = Path(json_config_file)
 
@@ -233,20 +239,18 @@ def merge_config(db_config, json_config_file):
         with path.open('w') as f:
             json.dump(db_config, f, indent=4)
 
-    #TODO: Добавить валидацию других полей
+    #TODO: Добавить валидацию других полей, заюзать jsonschema
     if db_config['HASHABLE_FIELD'] == db_config['DISPLAY_FIELD']:
         raise NotificationError('Parameters "HASHABLE_FIELD" and "DISPLAY_FIELD" must be different')
 
     if db_config['PREFIX_SIZE'] not in (1, 2):
         raise NotificationError('Parameter "PREFIX_SIZE" must be one or two')
 
-    if not isinstance(db_config['CHUNK_SIZE'], int):
-        raise NotificationError('Parameter "CHUNK_SIZE" must be integer value')
-
-    if not isinstance(db_config['FILE_BUFFE_SIZE'], int):
-        raise NotificationError('Parameter "FILE_BUFFE_SIZE" must be integer value')
+    if len(str(db_config['CSV_DELIMITER'])) < 1:
+        raise NotificationError('Parameter "CSV_DELIMITER" must be not empty')
 
     return db_config
+
 
 def main(db_config):
     parser = argparse.ArgumentParser(description=
@@ -274,6 +278,7 @@ def main(db_config):
         'search-all': lambda cmd: cmd.search_elements(),
         'search-one': lambda cmd: cmd.search_elements(get_first=True),
     }[args.cmd](cmd)
+
 
 if __name__ == '__main__':
     db_config = {
