@@ -94,7 +94,7 @@ class Commands:
         if not path.exists():
             return None
 
-        with path.open('r', self.FILE_BUFFE_SIZE, newline='', encoding='utf-8') as f:
+        with path.open('r', self.FILE_BUFFER_SIZE, newline='', encoding='utf-8') as f:
             for line in f:
                 line_arr = line.rstrip('\n').split(self.CSV_DELIMITER)
                 #TODO: Тут должна быть запись в лог
@@ -138,7 +138,7 @@ class Commands:
         if not self.hash_dir.exists():
             self.hash_dir.mkdir(parents=True, exist_ok=True)
 
-        with FileHelper(self.FILE_BUFFE_SIZE) as file_getter:
+        with FileHelper(self.FILE_BUFFER_SIZE) as file_getter:
             client = AsyncIOMotorClient(self.CONNECTION)
             loop = asyncio.get_event_loop()
             try:
@@ -197,8 +197,8 @@ class Commands:
                 current_rem = 0
 
                 try:
-                    with open(tmp_file, 'w', self.FILE_BUFFE_SIZE, newline='', encoding='utf-8') as output_file,\
-                        open(file, 'r', self.FILE_BUFFE_SIZE, newline='', encoding='utf-8') as input_file: 
+                    with open(tmp_file, 'w', self.FILE_BUFFER_SIZE, newline='', encoding='utf-8') as output_file,\
+                        open(file, 'r', self.FILE_BUFFER_SIZE, newline='', encoding='utf-8') as input_file: 
                         for line in input_file:
                             iterated += 1
                             hashed_line = self.hash_func(line)
@@ -291,7 +291,7 @@ if __name__ == '__main__':
         'HASH_FUNC': 'md5',
         'PREFIX_SIZE': 2,
         'CHUNK_SIZE': 1000,
-        'FILE_BUFFE_SIZE': 1048576, # 1 MB
+        'FILE_BUFFER_SIZE': 1048576, # 1 MB
         'CSV_DELIMITER': ';',
     }
 

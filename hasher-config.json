@@ -8,6 +8,6 @@
     "HASH_FUNC": "md5",
     "PREFIX_SIZE": 2,
     "CHUNK_SIZE": 1000,
-    "FILE_BUFFE_SIZE": 1048576,
+    "FILE_BUFFER_SIZE": 1048576,
     "CSV_DELIMITER": ";"
 }
